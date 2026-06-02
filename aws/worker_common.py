@@ -23,15 +23,46 @@ def filename_from_s3_key(s3_key: str) -> str:
 
 
 def parse_s3_events_from_sqs_body(body: str) -> list[dict[str, str]]:
-    payload = json.loads(body)
+    # Parse the SQS body which may be:
+    # - a raw S3 event JSON
+    # - an SNS notification JSON with a stringified "Message" field
+    # - double-encoded JSON (string containing JSON string)
+    try:
+        payload = json.loads(body)
+    except Exception:
+        # If body isn't valid JSON, return no events
+        return []
 
-    if "Message" in payload:
-        payload = json.loads(payload["Message"])
+    # Unwrap repeated JSON encoding (e.g. '"{...}"')
+    while isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            break
 
-    records = payload.get("Records", [])
+    # If this is an SNS envelope, extract the Message field which may itself
+    # be a JSON string or already a dict.
+    if isinstance(payload, dict) and "Message" in payload:
+        message = payload["Message"]
+        if isinstance(message, str):
+            try:
+                payload = json.loads(message)
+            except Exception:
+                # leave payload as the raw message string (unlikely to contain Records)
+                payload = message
+        else:
+            payload = message
+
+    # Now extract S3 Records if present
+    records = []
+    if isinstance(payload, dict):
+        records = payload.get("Records", []) or []
+    elif isinstance(payload, list):
+        records = payload
+
     events: list[dict[str, str]] = []
     for record in records:
-        if "s3" not in record:
+        if not isinstance(record, dict) or "s3" not in record:
             continue
 
         bucket = record["s3"]["bucket"]["name"]
